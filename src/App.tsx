@@ -1,168 +1,130 @@
 // App.tsx
-import React, { useMemo, useRef, useState } from "react";
-import MultiCompareSlider, { Segment } from "./MultiCompareSlider";
-import ProductOverlay from "./ProductOverlay";
-import { PRODUCTS } from "./products";
-import { pitchPxFrom, ProductConfig } from "./types";
+import React, { useMemo, useState } from "react";
+import MultiCompareSlider, {
+  Segment,
+} from "./components/slider/MultiCompareSlider";
+import DropInput from "./components/DropInput";
+import ProductOverlay from "./components/perf/ProductOverlay";
+import { PRODUCTS } from "./config/products";
+import { pitchPxFromMm } from "./lib/distance";
+import { lightingOverlay, needsReverseVision } from "./lib/lighting";
+import type { Lighting, Side } from "./types";
 
-type Lighting = "day" | "night";
-type Side = "inside" | "outside";
-
-// ---------- Drag & Drop uploader ----------
-function DropInput({
-  label,
-  onFile,
-  previewSrc,
-  accept = "image/*",
-}: {
-  label: string;
-  onFile: (file: File) => void;
-  previewSrc?: string;
-  accept?: string;
-}) {
-  const [dragOver, setDragOver] = useState(false);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  return (
-    <div
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        const f = e.dataTransfer.files?.[0];
-        if (f) onFile(f);
-      }}
-      onClick={() => inputRef.current?.click()}
-      style={{
-        width: 240,
-        minHeight: 120,
-        padding: 10,
-        border: "2px dashed " + (dragOver ? "#444" : "#bbb"),
-        borderRadius: 12,
-        background: dragOver ? "#f4f6f8" : "#fafafa",
-        cursor: "pointer",
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-        alignItems: "center",
-        justifyContent: "center",
-        textAlign: "center",
-        fontSize: 13,
-      }}
-      title="Click or drag an image here"
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") inputRef.current?.click();
-      }}
-    >
-      <strong>{label}</strong>
-      <span style={{ color: "#666" }}>Click or drop image</span>
-      {previewSrc && (
-        <img
-          src={previewSrc}
-          alt={`${label} preview`}
-          style={{
-            width: "100%",
-            height: 76,
-            objectFit: "cover",
-            borderRadius: 8,
-            border: "1px solid #e3e3e3",
-          }}
-        />
-      )}
-      <input
-        ref={inputRef}
-        type="file"
-        accept={accept}
-        style={{ display: "none" }}
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onFile(f);
-        }}
-      />
-    </div>
-  );
-}
-
-// ---------- Default placeholders ----------
-const DEFAULT_OUTSIDE_SCENE =
+const DEFAULT_OUTSIDE =
   "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?q=80&w=2144&auto=format&fit=crop&ixlib=rb-4.1.0";
-const DEFAULT_INSIDE_SCENE =
+const DEFAULT_INSIDE =
   "https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?q=80&w=2144&auto=format&fit=crop&ixlib=rb-4.1.0";
 
 export default function App() {
-  // Scenes
-  const [outsideSceneSrc, setOutsideSceneSrc] = useState<string | undefined>(
-    undefined
-  );
-  const [insideSceneSrc, setInsideSceneSrc] = useState<string | undefined>(
-    undefined
-  );
-  // Printed artwork (outside white face)
-  const [artworkSrc, setArtworkSrc] = useState<string | undefined>(undefined);
+  // Images
+  const [outsideScene, setOutsideScene] = useState<string>(); // what you see when you’re inside
+  const [insideScene, setInsideScene] = useState<string>(); // what you see when you’re outside
+  const [artwork, setArtwork] = useState<string>(); // printed on white (outside face)
 
-  // View & lighting
-  const [viewSide, setViewSide] = useState<Side>("inside");
+  // Viewing / rendering
+  const [side, setSide] = useState<Side>("inside");
   const [lighting, setLighting] = useState<Lighting>("day");
-
-  // Viewer distance & screen scale
   const [distanceM, setDistanceM] = useState<number>(3);
-  const [pxPerMm] = useState<number>(4); // make adjustable later if you want
-  const REF_M = 3;
+  const [pxPerMm] = useState<number>(4);
 
-  // Enable/disable per-product, derived from PRODUCTS (so config is the source of truth)
-  const [enabledIds, setEnabledIds] = useState<Record<string, boolean>>(() =>
+  // Reverse-vision strength (night + outside): 0..0.6
+  const [reverseStrength, setReverseStrength] = useState<number>(0.25);
+
+  // Enabled products
+  const [enabled, setEnabled] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(PRODUCTS.map((p) => [p.id, p.enabledDefault ?? true]))
   );
-
-  const enabledProducts: ProductConfig[] = useMemo(
-    () => PRODUCTS.filter((p) => enabledIds[p.id]),
-    [enabledIds]
+  const enabledProducts = useMemo(
+    () => PRODUCTS.filter((p) => enabled[p.id]),
+    [enabled]
   );
 
-  // Fixed background (one scene for all slices)
-  const backgroundNode = useMemo(() => {
-    const bgSrc =
-      viewSide === "inside"
-        ? outsideSceneSrc ?? DEFAULT_OUTSIDE_SCENE
-        : insideSceneSrc ?? DEFAULT_INSIDE_SCENE;
-    return (
-      <img
-        src={bgSrc}
-        alt="Scene"
-        draggable={false}
-        style={{ width: "100%", height: "100%", objectFit: "cover" }}
-      />
-    );
-  }, [viewSide, outsideSceneSrc, insideSceneSrc]);
+  // Helpers
+  const handleFile = (
+    e: React.ChangeEvent<HTMLInputElement>,
+    setSrc: (url: string) => void
+  ) => {
+    const f = e.target.files?.[0];
+    if (f) setSrc(URL.createObjectURL(f));
+  };
 
-  // Build overlay segments from configs
+  // Fixed background scene (one layer for all slices) + lighting + reverse-vision
+  const backgroundNode = useMemo(() => {
+    // When inside, you look OUT → show outside scene. When outside, you look IN → show inside scene.
+    const baseSrc =
+      side === "inside"
+        ? outsideScene ?? DEFAULT_OUTSIDE
+        : insideScene ?? DEFAULT_INSIDE;
+
+    const overlay = lightingOverlay(side, lighting);
+
+    return (
+      <div style={{ position: "absolute", inset: 0 }}>
+        {/* Main scene */}
+        <img
+          src={baseSrc}
+          alt="Scene"
+          draggable={false}
+          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        />
+
+        {/* Day/Night tint */}
+        {overlay && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: overlay,
+              pointerEvents: "none",
+            }}
+          />
+        )}
+
+        {/* Reverse-vision: at night, from outside, lit interior leaks through */}
+        {needsReverseVision(side, lighting) && (
+          <img
+            src={insideScene ?? DEFAULT_INSIDE}
+            alt="Lit interior through holes"
+            draggable={false}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              mixBlendMode: "screen",
+              opacity: Math.max(0, Math.min(0.6, reverseStrength)),
+              pointerEvents: "none",
+            }}
+          />
+        )}
+      </div>
+    );
+  }, [side, lighting, outsideScene, insideScene, reverseStrength]);
+
+  // Build slider segments (Original + enabled products)
   const segments: Segment[] = useMemo(() => {
     const base: Segment[] = [{ label: "Original" }];
-    const rest: Segment[] = enabledProducts.map((config) => {
-      const pitchPx = pitchPxFrom(config, pxPerMm, distanceM, REF_M);
+    const rest: Segment[] = enabledProducts.map((p) => {
+      const pitchPx = pitchPxFromMm(p.pitchMm, pxPerMm, distanceM, 3);
       return {
-        label: config.label,
+        label: p.label,
         custom: (
           <ProductOverlay
-            config={config}
-            printSrc={artworkSrc}
-            mode={viewSide}
-            lighting={lighting}
+            config={p}
             pitchPx={pitchPx}
+            side={side}
+            lighting={lighting}
+            printSrc={artwork}
+            distanceM={distanceM}
           />
         ),
       };
     });
     return base.concat(rest);
-  }, [enabledProducts, pxPerMm, distanceM, artworkSrc, viewSide, lighting]);
+  }, [enabledProducts, pxPerMm, distanceM, side, lighting, artwork]);
 
-  // Even spacing (N segments → N−1 handles)
+  // Evenly-spaced initial handles (N segments → N−1 handles)
   const initialPositions = useMemo(() => {
     const n = segments.length;
     if (n < 2) return [];
@@ -171,99 +133,81 @@ export default function App() {
     return cuts;
   }, [segments.length]);
 
-  // Remount key resets handle positions on changes
+  // Remount key to reset positions on key state changes
   const sliderKey = useMemo(() => {
     const ids = enabledProducts.map((p) => p.id).join("|") || "none";
-    return `slider-${ids}-dist${distanceM}-mode${viewSide}-light${lighting}`;
-  }, [enabledProducts, distanceM, viewSide, lighting]);
+    return `slider-${ids}-side${side}-light${lighting}-dist${distanceM}`;
+  }, [enabledProducts, side, lighting, distanceM]);
 
   return (
-    <div
-      className="container"
-      style={{ maxWidth: 1160, margin: "24px auto", padding: 16 }}
-    >
-      <h1 style={{ margin: "0 0 8px" }}>Contra Vision Compare</h1>
-      <p style={{ marginTop: 0 }}>
-        Fixed background with overlay products from separate configs. HD uses a{" "}
-        <strong>1&nbsp;mm</strong> hole; standard uses{" "}
-        <strong>~1.6&nbsp;mm</strong>.
+    <div style={{ maxWidth: 1160, margin: "24px auto", padding: 16 }}>
+      <h1 style={{ margin: 0 }}>Contra Vision Compare</h1>
+      <p style={{ marginTop: 4 }}>
+        Upload scenes, pick products, toggle inside/outside & day/night, and
+        adjust viewing distance.
       </p>
 
-      {/* Uploads */}
+      {/* Uploaders */}
       <div
-        style={{
-          display: "flex",
-          gap: 12,
-          flexWrap: "wrap",
-          margin: "12px 0 16px",
-        }}
+        style={{ display: "flex", flexWrap: "wrap", gap: 16, marginTop: 12 }}
       >
         <DropInput
-          label="Outside Scene (seen when Inside)"
-          previewSrc={outsideSceneSrc ?? DEFAULT_OUTSIDE_SCENE}
-          onFile={(f) => setOutsideSceneSrc(URL.createObjectURL(f))}
+          label="Outside Scene (what you see from inside)"
+          onFile={setOutsideScene}
+          defaultSrc={DEFAULT_OUTSIDE}
         />
         <DropInput
-          label="Inside Scene (seen when Outside)"
-          previewSrc={insideSceneSrc ?? DEFAULT_INSIDE_SCENE}
-          onFile={(f) => setInsideSceneSrc(URL.createObjectURL(f))}
+          label="Inside Scene (what you see from outside)"
+          onFile={setInsideScene}
+          defaultSrc={DEFAULT_INSIDE}
         />
         <DropInput
           label="Artwork (printed on white face)"
-          previewSrc={artworkSrc}
-          onFile={(f) => setArtworkSrc(URL.createObjectURL(f))}
+          onFile={setArtwork}
         />
       </div>
 
       {/* Toggles */}
       <div
-        style={{
-          display: "flex",
-          gap: 12,
-          alignItems: "center",
-          flexWrap: "wrap",
-          marginBottom: 12,
-        }}
+        style={{ display: "flex", gap: 16, flexWrap: "wrap", margin: "16px 0" }}
       >
-        {/* View side */}
+        {/* Side */}
         <div
           style={{
-            display: "inline-flex",
             border: "1px solid #ddd",
             borderRadius: 8,
             overflow: "hidden",
           }}
         >
           <button
-            onClick={() => setViewSide("inside")}
+            onClick={() => setSide("inside")}
             style={{
               padding: "8px 12px",
-              background: viewSide === "inside" ? "#111" : "#fff",
-              color: viewSide === "inside" ? "#fff" : "#111",
+              background: side === "inside" ? "#111" : "#fff",
+              color: side === "inside" ? "#fff" : "#111",
               border: "none",
               cursor: "pointer",
             }}
           >
-            Inside (Black)
+            Inside (view out)
           </button>
           <button
-            onClick={() => setViewSide("outside")}
+            onClick={() => setSide("outside")}
             style={{
               padding: "8px 12px",
-              background: viewSide === "outside" ? "#111" : "#fff",
-              color: viewSide === "outside" ? "#fff" : "#111",
+              background: side === "outside" ? "#111" : "#fff",
+              color: side === "outside" ? "#fff" : "#111",
               border: "none",
               cursor: "pointer",
             }}
           >
-            Outside (White + Print)
+            Outside (view in)
           </button>
         </div>
 
         {/* Lighting */}
         <div
           style={{
-            display: "inline-flex",
             border: "1px solid #ddd",
             borderRadius: 8,
             overflow: "hidden",
@@ -279,7 +223,7 @@ export default function App() {
               cursor: "pointer",
             }}
           >
-            Day (Outside Brighter)
+            Day
           </button>
           <button
             onClick={() => setLighting("night")}
@@ -291,15 +235,20 @@ export default function App() {
               cursor: "pointer",
             }}
           >
-            Night (Inside Brighter)
+            Night
           </button>
         </div>
 
-        {/* Viewing Distance */}
-        <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
-          <label style={{ fontSize: 13, color: "#333" }}>
-            Viewing Distance: {distanceM.toFixed(1)} m
-          </label>
+        {/* Viewing distance */}
+        <label
+          style={{
+            fontSize: 13,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          Viewing Distance: {distanceM.toFixed(1)} m
           <input
             type="range"
             min={0.5}
@@ -309,15 +258,36 @@ export default function App() {
             onChange={(e) => setDistanceM(parseFloat(e.target.value))}
             style={{ width: 220 }}
           />
-        </div>
+        </label>
+
+        {/* Reverse-vision strength (only meaningful when outside+night, but always adjustable) */}
+        <label
+          style={{
+            fontSize: 13,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          Interior Light (reverse-vision): {Math.round(reverseStrength * 100)}%
+          <input
+            type="range"
+            min={0}
+            max={0.6}
+            step={0.01}
+            value={reverseStrength}
+            onChange={(e) => setReverseStrength(parseFloat(e.target.value))}
+            style={{ width: 220 }}
+          />
+        </label>
       </div>
 
-      {/* Product toggles (bound to configs) */}
+      {/* Product toggles */}
       <div
         style={{
           display: "flex",
           flexWrap: "wrap",
-          gap: 10,
+          gap: 12,
           marginBottom: 12,
           padding: 10,
           border: "1px solid #eee",
@@ -329,17 +299,17 @@ export default function App() {
           <label
             key={p.id}
             style={{
+              fontSize: 13,
               display: "inline-flex",
               alignItems: "center",
               gap: 8,
-              fontSize: 13,
             }}
           >
             <input
               type="checkbox"
-              checked={!!enabledIds[p.id]}
+              checked={!!enabled[p.id]}
               onChange={(e) =>
-                setEnabledIds((prev) => ({ ...prev, [p.id]: e.target.checked }))
+                setEnabled((prev) => ({ ...prev, [p.id]: e.target.checked }))
               }
             />
             {p.label}
@@ -347,29 +317,32 @@ export default function App() {
         ))}
       </div>
 
-      {/* Slider (fixed background + overlays from configs) */}
-      {segments.length >= 2 && (
-        <div
-          className="card"
-          style={{
-            background: "#fff",
-            border: "1px solid #e3e3e3",
-            borderRadius: 16,
-            padding: 16,
-            boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
-          }}
-        >
-          <MultiCompareSlider
-            key={sliderKey}
-            background={backgroundNode}
-            segments={segments}
-            initialPositions={initialPositions}
-            height={460}
-            showLegend
-            showSliceLabels
-          />
-        </div>
-      )}
+      {/* Slider */}
+      <div
+        className="card"
+        style={{
+          background: "#fff",
+          border: "1px solid #e3e3e3",
+          borderRadius: 16,
+          padding: 16,
+          boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+        }}
+      >
+        <MultiCompareSlider
+          key={sliderKey}
+          background={backgroundNode}
+          segments={segments}
+          initialPositions={initialPositions}
+          height={460}
+          showLegend={false}
+          showSliceLabels
+        />
+      </div>
+
+      <p style={{ color: "#666", fontSize: 13, marginTop: 8 }}>
+        Tip: Drag the grips, or focus a grip and use ← → (hold Shift for larger
+        steps).
+      </p>
     </div>
   );
 }
